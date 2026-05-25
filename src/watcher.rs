@@ -246,3 +246,90 @@ fn normalize_process_name(name: &str) -> String {
 
     basename.trim().to_ascii_lowercase()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn watch_entry(process_name: &str, priority: u8) -> WatchEntry {
+        WatchEntry {
+            process_name: process_name.to_string(),
+            target_monitor: 1,
+            restore_on_exit: true,
+            priority,
+            resolution: None,
+            refresh_rate: None,
+        }
+    }
+
+    #[test]
+    fn normalize_process_name_extracts_filename_and_lowercases() {
+        let normalized = normalize_process_name(r"C:\Program Files\App\ALACRITTY.EXE");
+        assert_eq!(normalized, "alacritty.exe");
+    }
+
+    #[test]
+    fn find_watch_entry_matches_case_insensitively() {
+        let config = Config {
+            watch: vec![watch_entry("ALACRITTY.EXE", 0)],
+        };
+
+        let matched = find_watch_entry(&config, "alacritty.exe");
+        assert!(matched.is_some());
+    }
+
+    #[test]
+    fn winner_prefers_higher_priority() {
+        let config = Config {
+            watch: vec![watch_entry("a.exe", 1), watch_entry("b.exe", 5)],
+        };
+
+        let mut state = WatchState::default();
+        let now = Instant::now();
+        state.active.insert(
+            "a.exe".to_string(),
+            ActiveWatch {
+                pids: vec![1],
+                first_activated_at: now,
+            },
+        );
+        state.active.insert(
+            "b.exe".to_string(),
+            ActiveWatch {
+                pids: vec![2],
+                first_activated_at: now,
+            },
+        );
+
+        let winner = find_winner_key(&config, &state);
+        assert_eq!(winner.as_deref(), Some("b.exe"));
+    }
+
+    #[test]
+    fn winner_uses_newest_activation_for_priority_ties() {
+        let config = Config {
+            watch: vec![watch_entry("a.exe", 3), watch_entry("b.exe", 3)],
+        };
+
+        let mut state = WatchState::default();
+        let now = Instant::now();
+        state.active.insert(
+            "a.exe".to_string(),
+            ActiveWatch {
+                pids: vec![1],
+                first_activated_at: now,
+            },
+        );
+        state.active.insert(
+            "b.exe".to_string(),
+            ActiveWatch {
+                pids: vec![2],
+                first_activated_at: now + Duration::from_millis(1),
+            },
+        );
+
+        let winner = find_winner_key(&config, &state);
+        assert_eq!(winner.as_deref(), Some("b.exe"));
+    }
+}
