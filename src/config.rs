@@ -17,6 +17,7 @@ const CONFIG_TEMPLATE: &str = r#"# process-display-helper configuration
 # # Optional mode override (must be supported by target monitor):
 # # resolution = [2560, 1440]
 # # refresh_rate = 165
+# # flip_orientation = true
 #
 # [[watch]]
 # process_name = "obs64.exe"
@@ -41,6 +42,8 @@ pub struct WatchEntry {
     pub priority: u8,
     pub resolution: Option<[u16; 2]>,
     pub refresh_rate: Option<u16>,
+    #[serde(default)]
+    pub flip_orientation: bool,
 }
 
 pub fn load_config(exe_dir: &Path) -> Result<Config> {

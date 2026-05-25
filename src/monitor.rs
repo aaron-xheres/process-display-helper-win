@@ -1,20 +1,34 @@
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    CDS_NORESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE, DISP_CHANGE_SUCCESSFUL, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW,
-    DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, ENUM_CURRENT_SETTINGS,
-    ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsW,
+    CDS_NORESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW,
+    DEVMODE_DISPLAY_ORIENTATION, DEVMODEW, DISP_CHANGE, DISP_CHANGE_SUCCESSFUL,
+    DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_DISPLAYFREQUENCY,
+    DM_DISPLAYORIENTATION, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90, DMDO_180, DMDO_270,
+    DMDO_DEFAULT, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplaySettingsW,
 };
 use windows::core::PCWSTR;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DisplaySnapshot {
     pub primary: u8,
+    pub primary_device_name: String,
     pub resolution: (u16, u16),
     pub refresh_rate: u16,
+    pub flip_orientation: bool,
+    pub display_orientation: DEVMODE_DISPLAY_ORIENTATION,
+    pub monitor_modes: Vec<DisplayModeSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DisplayModeSnapshot {
+    pub device_name: String,
+    pub resolution: (u16, u16),
+    pub refresh_rate: u16,
+    pub display_orientation: DEVMODE_DISPLAY_ORIENTATION,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +38,7 @@ pub struct MonitorInfo {
     pub position: (i32, i32),
     pub resolution: (u16, u16),
     pub refresh_rate: u16,
+    pub display_orientation: DEVMODE_DISPLAY_ORIENTATION,
     pub is_primary: bool,
 }
 
@@ -62,10 +77,13 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
             continue;
         }
 
-        let position = unsafe {
+        let (position, display_orientation) = unsafe {
             (
-                mode.Anonymous1.Anonymous2.dmPosition.x,
-                mode.Anonymous1.Anonymous2.dmPosition.y,
+                (
+                    mode.Anonymous1.Anonymous2.dmPosition.x,
+                    mode.Anonymous1.Anonymous2.dmPosition.y,
+                ),
+                mode.Anonymous1.Anonymous2.dmDisplayOrientation,
             )
         };
 
@@ -81,6 +99,7 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
             position,
             resolution: (mode.dmPelsWidth as u16, mode.dmPelsHeight as u16),
             refresh_rate: refresh,
+            display_orientation,
             is_primary: position == (0, 0),
         });
 
@@ -97,17 +116,111 @@ pub fn current_primary_snapshot() -> Result<DisplaySnapshot> {
         .find(|monitor| monitor.is_primary)
         .ok_or_else(|| anyhow!("no primary monitor found"))?;
 
+    let normalized_resolution =
+        normalize_resolution_for_orientation(primary.resolution, primary.display_orientation);
+
+    let monitor_modes = monitors
+        .iter()
+        .map(|monitor| DisplayModeSnapshot {
+            device_name: monitor.device_name.clone(),
+            resolution: normalize_resolution_for_orientation(
+                monitor.resolution,
+                monitor.display_orientation,
+            ),
+            refresh_rate: monitor.refresh_rate,
+            display_orientation: monitor.display_orientation,
+        })
+        .collect();
+
     Ok(DisplaySnapshot {
         primary: primary.index,
-        resolution: primary.resolution,
+        primary_device_name: primary.device_name.clone(),
+        resolution: normalized_resolution,
         refresh_rate: primary.refresh_rate,
+        flip_orientation: is_flipped_orientation(primary.display_orientation),
+        display_orientation: primary.display_orientation,
+        monitor_modes,
     })
+}
+
+pub fn restore_display_snapshot(snapshot: &DisplaySnapshot) -> Result<()> {
+    let monitors = enumerate_monitors()?;
+    let monitor_indices_by_name: HashMap<&str, u8> = monitors
+        .iter()
+        .map(|monitor| (monitor.device_name.as_str(), monitor.index))
+        .collect();
+
+    let primary_index = monitor_indices_by_name
+        .get(snapshot.primary_device_name.as_str())
+        .copied()
+        .unwrap_or(snapshot.primary);
+
+    set_primary_monitor_with_orientation(
+        primary_index,
+        Some([snapshot.resolution.0, snapshot.resolution.1]),
+        Some(snapshot.refresh_rate),
+        snapshot.flip_orientation,
+        Some(snapshot.display_orientation),
+    )
+    .with_context(|| {
+        format!(
+            "failed restoring primary monitor {}",
+            snapshot.primary_device_name
+        )
+    })?;
+
+    for mode in &snapshot.monitor_modes {
+        if mode.device_name == snapshot.primary_device_name {
+            continue;
+        }
+
+        if !monitor_indices_by_name.contains_key(mode.device_name.as_str()) {
+            tracing::warn!(
+                device = %mode.device_name,
+                "skipping baseline monitor restore because device is no longer present"
+            );
+            continue;
+        }
+
+        apply_mode_only(
+            &mode.device_name,
+            mode.resolution.0,
+            mode.resolution.1,
+            mode.refresh_rate,
+            mode.display_orientation,
+        )
+        .with_context(|| {
+            format!(
+                "failed restoring monitor mode for {}",
+                mode.device_name
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 pub fn set_primary_monitor(
     target_index: u8,
     resolution: Option<[u16; 2]>,
     refresh_rate: Option<u16>,
+    flip_orientation: bool,
+) -> Result<()> {
+    set_primary_monitor_with_orientation(
+        target_index,
+        resolution,
+        refresh_rate,
+        flip_orientation,
+        None,
+    )
+}
+
+fn set_primary_monitor_with_orientation(
+    target_index: u8,
+    resolution: Option<[u16; 2]>,
+    refresh_rate: Option<u16>,
+    flip_orientation: bool,
+    orientation_override: Option<DEVMODE_DISPLAY_ORIENTATION>,
 ) -> Result<()> {
     let monitors = enumerate_monitors()?;
     let target = monitors
@@ -118,25 +231,13 @@ pub fn set_primary_monitor(
     let desired_width = resolution.map(|v| v[0]).unwrap_or(target.resolution.0);
     let desired_height = resolution.map(|v| v[1]).unwrap_or(target.resolution.1);
     let desired_refresh = refresh_rate.unwrap_or(target.refresh_rate);
-
-    if !is_mode_supported(
-        &target.device_name,
-        desired_width,
-        desired_height,
-        desired_refresh,
-    ) {
-        bail!(
-            "requested mode {}x{}@{}Hz is not supported by monitor {}",
-            desired_width,
-            desired_height,
-            desired_refresh,
-            target.index
-        );
-    }
+    let desired_orientation = orientation_override
+        .unwrap_or_else(|| desired_display_orientation(desired_width, desired_height, flip_orientation));
 
     let mode_change_requested = desired_width != target.resolution.0
         || desired_height != target.resolution.1
-        || desired_refresh != target.refresh_rate;
+        || desired_refresh != target.refresh_rate
+        || desired_orientation != target.display_orientation;
 
     if target.is_primary && !mode_change_requested {
         tracing::info!(
@@ -152,12 +253,15 @@ pub fn set_primary_monitor(
             desired_width,
             desired_height,
             desired_refresh,
+            desired_orientation,
         )?;
         tracing::info!(
             target_monitor = target.index,
             width = desired_width,
             height = desired_height,
             refresh_hz = desired_refresh,
+            flip_orientation,
+            desired_orientation = desired_orientation.0,
             "target monitor already primary; applied mode change only"
         );
         return Ok(());
@@ -236,6 +340,7 @@ pub fn set_primary_monitor(
             desired_width,
             desired_height,
             desired_refresh,
+            desired_orientation,
         )
         .context("failed to apply target monitor mode after primary switch")?;
     }
@@ -245,31 +350,65 @@ pub fn set_primary_monitor(
         width = desired_width,
         height = desired_height,
         refresh_hz = desired_refresh,
+        flip_orientation,
+        desired_orientation = desired_orientation.0,
         "primary monitor switched"
     );
 
     Ok(())
 }
 
-fn apply_mode_only(device_name: &str, width: u16, height: u16, refresh_rate: u16) -> Result<()> {
+fn apply_mode_only(
+    device_name: &str,
+    width: u16,
+    height: u16,
+    refresh_rate: u16,
+    desired_orientation: DEVMODE_DISPLAY_ORIENTATION,
+) -> Result<()> {
     let device_name_wide = to_wide_null_terminated(device_name);
-    let mut mode = query_current_mode(PCWSTR(device_name_wide.as_ptr()))?;
+    let mut attempts = vec![(width, height)];
+    if width != height {
+        attempts.push((height, width));
+    }
 
-    mode.dmPelsWidth = width as u32;
-    mode.dmPelsHeight = height as u32;
-    mode.dmDisplayFrequency = refresh_rate as u32;
-    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    let mut errors: Vec<String> = Vec::new();
 
-    let status = unsafe {
-        ChangeDisplaySettingsExW(
+    for (candidate_width, candidate_height) in attempts.iter().copied() {
+        match apply_mode_single_pass(
             PCWSTR(device_name_wide.as_ptr()),
-            Some(std::ptr::from_ref(&mode)),
-            HWND(std::ptr::null_mut()),
-            CDS_UPDATEREGISTRY,
-            None,
-        )
-    };
-    ensure_display_change_success(status).context("failed to apply monitor mode")
+            desired_orientation,
+            candidate_width,
+            candidate_height,
+            refresh_rate,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(format!(
+                "single-pass {}x{}@{}Hz failed: {}",
+                candidate_width, candidate_height, refresh_rate, error
+            )),
+        }
+    }
+
+    for (candidate_width, candidate_height) in attempts {
+        match apply_mode_orientation_first(
+            PCWSTR(device_name_wide.as_ptr()),
+            desired_orientation,
+            candidate_width,
+            candidate_height,
+            refresh_rate,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(error) => errors.push(format!(
+                "orientation-first {}x{}@{}Hz failed: {}",
+                candidate_width, candidate_height, refresh_rate, error
+            )),
+        }
+    }
+
+    bail!(
+        "failed to apply monitor mode after fallback attempts: {}",
+        errors.join(" | ")
+    )
 }
 
 fn query_current_mode(device_name: PCWSTR) -> Result<DEVMODEW> {
@@ -284,36 +423,70 @@ fn query_current_mode(device_name: PCWSTR) -> Result<DEVMODEW> {
     Ok(mode)
 }
 
-fn is_mode_supported(device_name: &str, width: u16, height: u16, refresh_rate: u16) -> bool {
-    let device_name_wide = to_wide_null_terminated(device_name);
-    let mut mode_num: u32 = 0;
+fn apply_mode_single_pass(
+    device_name: PCWSTR,
+    desired_orientation: DEVMODE_DISPLAY_ORIENTATION,
+    width: u16,
+    height: u16,
+    refresh_rate: u16,
+) -> Result<()> {
+    let mut mode = query_current_mode(device_name)?;
+    mode.Anonymous1.Anonymous2.dmDisplayOrientation = desired_orientation;
+    mode.dmPelsWidth = width as u32;
+    mode.dmPelsHeight = height as u32;
+    mode.dmDisplayFrequency = refresh_rate as u32;
+    mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION;
 
-    loop {
-        let mut mode = DEVMODEW::default();
-        mode.dmSize = size_of::<DEVMODEW>() as u16;
+    let status = unsafe {
+        ChangeDisplaySettingsExW(
+            device_name,
+            Some(std::ptr::from_ref(&mode)),
+            HWND(std::ptr::null_mut()),
+            CDS_UPDATEREGISTRY,
+            None,
+        )
+    };
+    ensure_display_change_success(status)
+}
 
-        let ok = unsafe {
-            EnumDisplaySettingsW(
-                PCWSTR(device_name_wide.as_ptr()),
-                ENUM_DISPLAY_SETTINGS_MODE(mode_num),
-                &mut mode,
+fn apply_mode_orientation_first(
+    device_name: PCWSTR,
+    desired_orientation: DEVMODE_DISPLAY_ORIENTATION,
+    width: u16,
+    height: u16,
+    refresh_rate: u16,
+) -> Result<()> {
+    let mut orientation_mode = query_current_mode(device_name)?;
+    let current_orientation = unsafe { orientation_mode.Anonymous1.Anonymous2.dmDisplayOrientation };
+
+    if current_orientation != desired_orientation {
+        let (orientation_width, orientation_height) = mode_dimensions_for_orientation_transition(
+            orientation_mode.dmPelsWidth as u16,
+            orientation_mode.dmPelsHeight as u16,
+            current_orientation,
+            desired_orientation,
+        );
+
+        orientation_mode.Anonymous1.Anonymous2.dmDisplayOrientation = desired_orientation;
+        orientation_mode.dmPelsWidth = orientation_width as u32;
+        orientation_mode.dmPelsHeight = orientation_height as u32;
+        orientation_mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION;
+
+        let orientation_status = unsafe {
+            ChangeDisplaySettingsExW(
+                device_name,
+                Some(std::ptr::from_ref(&orientation_mode)),
+                HWND(std::ptr::null_mut()),
+                CDS_UPDATEREGISTRY,
+                None,
             )
         };
-        if !ok.as_bool() {
-            break;
-        }
-
-        if mode.dmPelsWidth as u16 == width
-            && mode.dmPelsHeight as u16 == height
-            && mode.dmDisplayFrequency as u16 == refresh_rate
-        {
-            return true;
-        }
-
-        mode_num = mode_num.saturating_add(1);
+        ensure_display_change_success(orientation_status)
+            .context("failed orientation step")?;
     }
 
-    false
+    apply_mode_single_pass(device_name, desired_orientation, width, height, refresh_rate)
+        .context("failed final mode step")
 }
 
 fn ensure_display_change_success(status: DISP_CHANGE) -> Result<()> {
@@ -322,6 +495,64 @@ fn ensure_display_change_success(status: DISP_CHANGE) -> Result<()> {
     }
 
     bail!("display API returned status code {}", status.0)
+}
+
+fn desired_display_orientation(
+    width: u16,
+    height: u16,
+    flip_orientation: bool,
+) -> DEVMODE_DISPLAY_ORIENTATION {
+    if is_portrait_resolution(width, height) {
+        if flip_orientation { DMDO_270 } else { DMDO_90 }
+    } else if flip_orientation {
+        DMDO_180
+    } else {
+        DMDO_DEFAULT
+    }
+}
+
+fn mode_dimensions_for_orientation_transition(
+    width: u16,
+    height: u16,
+    current_orientation: DEVMODE_DISPLAY_ORIENTATION,
+    desired_orientation: DEVMODE_DISPLAY_ORIENTATION,
+) -> (u16, u16) {
+    if is_portrait_orientation(current_orientation) != is_portrait_orientation(desired_orientation)
+    {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
+fn is_portrait_resolution(width: u16, height: u16) -> bool {
+    height > width
+}
+
+fn normalize_resolution_for_orientation(
+    resolution: (u16, u16),
+    orientation: DEVMODE_DISPLAY_ORIENTATION,
+) -> (u16, u16) {
+    let (width, height) = resolution;
+    if is_portrait_orientation(orientation) {
+        if width > height {
+            (height, width)
+        } else {
+            (width, height)
+        }
+    } else if height > width {
+        (height, width)
+    } else {
+        (width, height)
+    }
+}
+
+fn is_portrait_orientation(orientation: DEVMODE_DISPLAY_ORIENTATION) -> bool {
+    orientation == DMDO_90 || orientation == DMDO_270
+}
+
+fn is_flipped_orientation(orientation: DEVMODE_DISPLAY_ORIENTATION) -> bool {
+    orientation == DMDO_180 || orientation == DMDO_270
 }
 
 fn wide_to_string(wide: &[u16]) -> String {
@@ -334,4 +565,81 @@ fn to_wide_null_terminated(value: &str) -> Vec<u16> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orientation_defaults_to_landscape_for_wide_resolution() {
+        assert_eq!(desired_display_orientation(1920, 1080, false), DMDO_DEFAULT);
+    }
+
+    #[test]
+    fn orientation_uses_portrait_for_tall_resolution() {
+        assert_eq!(desired_display_orientation(1080, 1920, false), DMDO_90);
+    }
+
+    #[test]
+    fn orientation_uses_flipped_variant_when_requested() {
+        assert_eq!(desired_display_orientation(1920, 1080, true), DMDO_180);
+        assert_eq!(desired_display_orientation(1080, 1920, true), DMDO_270);
+    }
+
+    #[test]
+    fn flipped_orientation_detection_matches_expected_values() {
+        assert!(!is_flipped_orientation(DMDO_DEFAULT));
+        assert!(!is_flipped_orientation(DMDO_90));
+        assert!(is_flipped_orientation(DMDO_180));
+        assert!(is_flipped_orientation(DMDO_270));
+    }
+
+    #[test]
+    fn mode_dimensions_swap_for_portrait_landscape_transition() {
+        assert_eq!(
+            mode_dimensions_for_orientation_transition(1920, 1080, DMDO_90, DMDO_DEFAULT),
+            (1080, 1920)
+        );
+        assert_eq!(
+            mode_dimensions_for_orientation_transition(1080, 1920, DMDO_DEFAULT, DMDO_90),
+            (1920, 1080)
+        );
+    }
+
+    #[test]
+    fn mode_dimensions_stay_same_when_orientation_class_unchanged() {
+        assert_eq!(
+            mode_dimensions_for_orientation_transition(1920, 1080, DMDO_DEFAULT, DMDO_180),
+            (1920, 1080)
+        );
+        assert_eq!(
+            mode_dimensions_for_orientation_transition(1080, 1920, DMDO_90, DMDO_270),
+            (1080, 1920)
+        );
+    }
+
+    #[test]
+    fn normalize_resolution_matches_portrait_orientation() {
+        assert_eq!(
+            normalize_resolution_for_orientation((1920, 1080), DMDO_90),
+            (1080, 1920)
+        );
+        assert_eq!(
+            normalize_resolution_for_orientation((1080, 1920), DMDO_90),
+            (1080, 1920)
+        );
+    }
+
+    #[test]
+    fn normalize_resolution_matches_landscape_orientation() {
+        assert_eq!(
+            normalize_resolution_for_orientation((1080, 1920), DMDO_DEFAULT),
+            (1920, 1080)
+        );
+        assert_eq!(
+            normalize_resolution_for_orientation((1920, 1080), DMDO_DEFAULT),
+            (1920, 1080)
+        );
+    }
 }

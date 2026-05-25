@@ -1,5 +1,7 @@
 use crate::config::{Config, WatchEntry};
-use crate::monitor::{DisplaySnapshot, current_primary_snapshot, set_primary_monitor};
+use crate::monitor::{
+    DisplaySnapshot, current_primary_snapshot, restore_display_snapshot, set_primary_monitor,
+};
 use crate::process_monitor::ProcessEvent;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -56,6 +58,7 @@ pub fn reload_config(config: &Config, state: &mut WatchState) -> Result<()> {
             watch_entry.target_monitor,
             watch_entry.resolution,
             watch_entry.refresh_rate,
+            watch_entry.flip_orientation,
         ) {
             tracing::error!(
                 process = %winner_key,
@@ -78,12 +81,20 @@ pub fn reload_config(config: &Config, state: &mut WatchState) -> Result<()> {
     }
 
     if previous_winner.is_some() {
-        if let Some(snapshot) = state.baseline {
-            if let Err(error) = set_primary_monitor(
-                snapshot.primary,
-                Some([snapshot.resolution.0, snapshot.resolution.1]),
-                Some(snapshot.refresh_rate),
-            ) {
+        if let Some(snapshot) = state.baseline.as_ref() {
+            tracing::info!(
+                restore_reason = "config-reload",
+                target_monitor = snapshot.primary,
+                primary_device = %snapshot.primary_device_name,
+                width = snapshot.resolution.0,
+                height = snapshot.resolution.1,
+                refresh_hz = snapshot.refresh_rate,
+                flip_orientation = snapshot.flip_orientation,
+                display_orientation = snapshot.display_orientation.0,
+                saved_monitor_modes = snapshot.monitor_modes.len(),
+                "restoring baseline display snapshot"
+            );
+            if let Err(error) = restore_display_snapshot(snapshot) {
                 tracing::error!(error = %error, "failed to restore baseline display after config reload");
             }
         }
@@ -128,7 +139,19 @@ fn handle_started(name: &str, pid: u32, config: &Config, state: &mut WatchState)
     }
 
     if was_empty && state.baseline.is_none() {
-        state.baseline = Some(current_primary_snapshot()?);
+        let snapshot = current_primary_snapshot()?;
+        tracing::info!(
+            target_monitor = snapshot.primary,
+            primary_device = %snapshot.primary_device_name,
+            width = snapshot.resolution.0,
+            height = snapshot.resolution.1,
+            refresh_hz = snapshot.refresh_rate,
+            flip_orientation = snapshot.flip_orientation,
+            display_orientation = snapshot.display_orientation.0,
+            saved_monitor_modes = snapshot.monitor_modes.len(),
+            "captured baseline display snapshot"
+        );
+        state.baseline = Some(snapshot);
     }
 
     apply_winner_if_changed(config, state)
@@ -162,12 +185,20 @@ fn handle_exited(pid: u32, config: &Config, state: &mut WatchState) -> Result<()
 
     if state.active.is_empty() {
         if should_restore {
-            if let Some(snapshot) = state.baseline {
-                if let Err(error) = set_primary_monitor(
-                    snapshot.primary,
-                    Some([snapshot.resolution.0, snapshot.resolution.1]),
-                    Some(snapshot.refresh_rate),
-                ) {
+            if let Some(snapshot) = state.baseline.as_ref() {
+                tracing::info!(
+                    restore_reason = "last-process-exit",
+                    target_monitor = snapshot.primary,
+                    primary_device = %snapshot.primary_device_name,
+                    width = snapshot.resolution.0,
+                    height = snapshot.resolution.1,
+                    refresh_hz = snapshot.refresh_rate,
+                    flip_orientation = snapshot.flip_orientation,
+                    display_orientation = snapshot.display_orientation.0,
+                    saved_monitor_modes = snapshot.monitor_modes.len(),
+                    "restoring baseline display snapshot"
+                );
+                if let Err(error) = restore_display_snapshot(snapshot) {
                     tracing::error!(error = %error, "failed to restore baseline display state");
                 }
             }
@@ -197,6 +228,7 @@ fn apply_winner_if_changed(config: &Config, state: &mut WatchState) -> Result<()
             watch_entry.target_monitor,
             watch_entry.resolution,
             watch_entry.refresh_rate,
+            watch_entry.flip_orientation,
         ) {
             tracing::error!(
                 process = %winner_key,
@@ -260,6 +292,7 @@ mod tests {
             priority,
             resolution: None,
             refresh_rate: None,
+            flip_orientation: false,
         }
     }
 
