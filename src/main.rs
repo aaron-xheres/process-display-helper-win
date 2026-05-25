@@ -24,7 +24,11 @@ fn run() -> Result<()> {
     let exe_dir = executable_dir()?;
     logger::init_logger(&exe_dir)?;
 
-    tracing::info!(path = %exe_dir.display(), "starting process-display-helper");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        path = %exe_dir.display(),
+        "starting process-display-helper"
+    );
 
     let config = config::load_config(&exe_dir)?;
     tracing::info!(watch_entries = config.watch.len(), "config loaded");
