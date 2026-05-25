@@ -75,6 +75,9 @@ impl Write for RotatingFileWriter {
             }
         }
 
+        // Persist log output eagerly so diagnostics are visible while the tray daemon is still running.
+        self.current.flush()?;
+
         Ok(buf.len())
     }
 
