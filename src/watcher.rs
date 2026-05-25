@@ -1,9 +1,10 @@
 use crate::config::{Config, WatchEntry};
 use crate::monitor::{
-    DisplaySnapshot, current_primary_snapshot, restore_display_snapshot, set_primary_monitor,
+    DisplaySnapshot, current_primary_snapshot, restore_display_snapshot, set_monitor_mode,
+    set_primary_monitor,
 };
 use crate::process_monitor::ProcessEvent;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -54,15 +55,13 @@ pub fn reload_config(config: &Config, state: &mut WatchState) -> Result<()> {
             return Ok(());
         };
 
-        if let Err(error) = set_primary_monitor(
-            watch_entry.target_monitor,
-            watch_entry.resolution,
-            watch_entry.refresh_rate,
-            watch_entry.flip_orientation,
-        ) {
+        let primary_monitor = effective_primary_monitor(watch_entry);
+
+        if let Err(error) = apply_watch_display_plan(watch_entry) {
             tracing::error!(
                 process = %winner_key,
-                target_monitor = watch_entry.target_monitor,
+                primary_monitor = ?primary_monitor,
+                display_count = watch_entry.display.len(),
                 error = %error,
                 "failed to apply winner display after config reload"
             );
@@ -72,7 +71,8 @@ pub fn reload_config(config: &Config, state: &mut WatchState) -> Result<()> {
         tracing::info!(
             process = %winner_key,
             priority = watch_entry.priority,
-            target_monitor = watch_entry.target_monitor,
+            primary_monitor = ?primary_monitor,
+            display_count = watch_entry.display.len(),
             "applied winner display configuration after config reload"
         );
 
@@ -224,15 +224,13 @@ fn apply_winner_if_changed(config: &Config, state: &mut WatchState) -> Result<()
             return Ok(());
         };
 
-        if let Err(error) = set_primary_monitor(
-            watch_entry.target_monitor,
-            watch_entry.resolution,
-            watch_entry.refresh_rate,
-            watch_entry.flip_orientation,
-        ) {
+        let primary_monitor = effective_primary_monitor(watch_entry);
+
+        if let Err(error) = apply_watch_display_plan(watch_entry) {
             tracing::error!(
                 process = %winner_key,
-                target_monitor = watch_entry.target_monitor,
+                primary_monitor = ?primary_monitor,
+                display_count = watch_entry.display.len(),
                 error = %error,
                 "failed to apply winner display configuration; skipping switch"
             );
@@ -242,12 +240,68 @@ fn apply_winner_if_changed(config: &Config, state: &mut WatchState) -> Result<()
         tracing::info!(
             process = %winner_key,
             priority = watch_entry.priority,
-            target_monitor = watch_entry.target_monitor,
+            primary_monitor = ?primary_monitor,
+            display_count = watch_entry.display.len(),
             "display control moved to winner"
         );
     }
 
     state.current_winner = next_winner;
+    Ok(())
+}
+
+fn effective_primary_monitor(watch_entry: &WatchEntry) -> Option<u8> {
+    watch_entry
+        .display
+        .iter()
+        .rev()
+        .find(|display| display.set_primary)
+        .map(|display| display.monitor)
+}
+
+fn apply_watch_display_plan(watch_entry: &WatchEntry) -> Result<()> {
+    let effective_primary = watch_entry
+        .display
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, display)| display.set_primary);
+    let effective_primary_monitor = effective_primary.map(|(_, display)| display.monitor);
+
+    for display in &watch_entry.display {
+        if Some(display.monitor) == effective_primary_monitor {
+            continue;
+        }
+
+        set_monitor_mode(
+            display.monitor,
+            display.resolution,
+            display.refresh_rate,
+            display.flip_orientation,
+        )
+        .with_context(|| {
+            format!(
+                "failed applying monitor {} mode for process {}",
+                display.monitor, watch_entry.process_name
+            )
+        })?;
+    }
+
+    if let Some((_, display)) = effective_primary {
+        set_primary_monitor(
+            display.monitor,
+            display.resolution,
+            display.refresh_rate,
+            display.flip_orientation,
+        )
+        .with_context(|| {
+            format!(
+                "failed applying primary monitor {} for process {}",
+                display.monitor, watch_entry.process_name
+            )
+        })?;
+    }
+
     Ok(())
 }
 
@@ -282,18 +336,42 @@ fn normalize_process_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DisplayEntry;
     use std::time::Duration;
 
-    fn watch_entry(process_name: &str, priority: u8) -> WatchEntry {
-        WatchEntry {
-            process_name: process_name.to_string(),
-            target_monitor: 1,
-            restore_on_exit: true,
-            priority,
+    fn display_entry(monitor: u8, set_primary: bool) -> DisplayEntry {
+        DisplayEntry {
+            monitor,
+            set_primary,
             resolution: None,
             refresh_rate: None,
             flip_orientation: false,
         }
+    }
+
+    fn watch_entry(process_name: &str, priority: u8) -> WatchEntry {
+        WatchEntry {
+            process_name: process_name.to_string(),
+            restore_on_exit: true,
+            priority,
+            display: vec![display_entry(1, true)],
+        }
+    }
+
+    #[test]
+    fn effective_primary_monitor_uses_last_set_primary_entry() {
+        let entry = WatchEntry {
+            process_name: "test.exe".to_string(),
+            restore_on_exit: true,
+            priority: 0,
+            display: vec![
+                display_entry(1, true),
+                display_entry(2, false),
+                display_entry(3, true),
+            ],
+        };
+
+        assert_eq!(effective_primary_monitor(&entry), Some(3));
     }
 
     #[test]

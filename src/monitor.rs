@@ -189,12 +189,7 @@ pub fn restore_display_snapshot(snapshot: &DisplaySnapshot) -> Result<()> {
             mode.refresh_rate,
             mode.display_orientation,
         )
-        .with_context(|| {
-            format!(
-                "failed restoring monitor mode for {}",
-                mode.device_name
-            )
-        })?;
+        .with_context(|| format!("failed restoring monitor mode for {}", mode.device_name))?;
     }
 
     Ok(())
@@ -215,6 +210,62 @@ pub fn set_primary_monitor(
     )
 }
 
+pub fn set_monitor_mode(
+    target_index: u8,
+    resolution: Option<[u16; 2]>,
+    refresh_rate: Option<u16>,
+    flip_orientation: bool,
+) -> Result<()> {
+    let monitors = enumerate_monitors()?;
+    let target = monitors
+        .iter()
+        .find(|monitor| monitor.index == target_index)
+        .ok_or_else(|| anyhow!("target monitor index {} not found", target_index))?;
+
+    let desired_width = resolution
+        .map(|value| value[0])
+        .unwrap_or(target.resolution.0);
+    let desired_height = resolution
+        .map(|value| value[1])
+        .unwrap_or(target.resolution.1);
+    let desired_refresh = refresh_rate.unwrap_or(target.refresh_rate);
+    let desired_orientation =
+        desired_display_orientation(desired_width, desired_height, flip_orientation);
+
+    let mode_change_requested = desired_width != target.resolution.0
+        || desired_height != target.resolution.1
+        || desired_refresh != target.refresh_rate
+        || desired_orientation != target.display_orientation;
+
+    if !mode_change_requested {
+        tracing::info!(
+            target_monitor = target.index,
+            "target monitor mode already matches requested values; skipping mode update"
+        );
+        return Ok(());
+    }
+
+    apply_mode_only(
+        &target.device_name,
+        desired_width,
+        desired_height,
+        desired_refresh,
+        desired_orientation,
+    )?;
+
+    tracing::info!(
+        target_monitor = target.index,
+        width = desired_width,
+        height = desired_height,
+        refresh_hz = desired_refresh,
+        flip_orientation,
+        desired_orientation = desired_orientation.0,
+        "monitor mode updated"
+    );
+
+    Ok(())
+}
+
 fn set_primary_monitor_with_orientation(
     target_index: u8,
     resolution: Option<[u16; 2]>,
@@ -231,8 +282,9 @@ fn set_primary_monitor_with_orientation(
     let desired_width = resolution.map(|v| v[0]).unwrap_or(target.resolution.0);
     let desired_height = resolution.map(|v| v[1]).unwrap_or(target.resolution.1);
     let desired_refresh = refresh_rate.unwrap_or(target.refresh_rate);
-    let desired_orientation = orientation_override
-        .unwrap_or_else(|| desired_display_orientation(desired_width, desired_height, flip_orientation));
+    let desired_orientation = orientation_override.unwrap_or_else(|| {
+        desired_display_orientation(desired_width, desired_height, flip_orientation)
+    });
 
     let mode_change_requested = desired_width != target.resolution.0
         || desired_height != target.resolution.1
@@ -457,7 +509,8 @@ fn apply_mode_orientation_first(
     refresh_rate: u16,
 ) -> Result<()> {
     let mut orientation_mode = query_current_mode(device_name)?;
-    let current_orientation = unsafe { orientation_mode.Anonymous1.Anonymous2.dmDisplayOrientation };
+    let current_orientation =
+        unsafe { orientation_mode.Anonymous1.Anonymous2.dmDisplayOrientation };
 
     if current_orientation != desired_orientation {
         let (orientation_width, orientation_height) = mode_dimensions_for_orientation_transition(
@@ -481,12 +534,17 @@ fn apply_mode_orientation_first(
                 None,
             )
         };
-        ensure_display_change_success(orientation_status)
-            .context("failed orientation step")?;
+        ensure_display_change_success(orientation_status).context("failed orientation step")?;
     }
 
-    apply_mode_single_pass(device_name, desired_orientation, width, height, refresh_rate)
-        .context("failed final mode step")
+    apply_mode_single_pass(
+        device_name,
+        desired_orientation,
+        width,
+        height,
+        refresh_rate,
+    )
+    .context("failed final mode step")
 }
 
 fn ensure_display_change_success(status: DISP_CHANGE) -> Result<()> {
