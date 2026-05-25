@@ -11,7 +11,7 @@ use std::sync::mpsc::Sender;
 const PROCESS_PROVIDER_GUID: &str = "22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716";
 const PROCESS_START_EVENT_ID: u16 = 1;
 const PROCESS_STOP_EVENT_ID: u16 = 2;
-const TRACE_SESSION_NAME: &str = "process-display-helper";
+const TRACE_SESSION_NAME: &str = "xhrs-process-display-helper";
 
 #[derive(Debug, Clone)]
 pub enum ProcessEvent {
