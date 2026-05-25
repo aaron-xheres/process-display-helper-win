@@ -166,7 +166,32 @@ pub fn set_primary_monitor(
     let offset_x = target.position.0;
     let offset_y = target.position.1;
 
-    for monitor in &monitors {
+    let target_device_name_wide = to_wide_null_terminated(&target.device_name);
+    let mut target_mode = query_current_mode(PCWSTR(target_device_name_wide.as_ptr()))?;
+    target_mode.Anonymous1.Anonymous2.dmPosition.x = 0;
+    target_mode.Anonymous1.Anonymous2.dmPosition.y = 0;
+    target_mode.dmFields |= DM_POSITION;
+
+    let target_status = unsafe {
+        ChangeDisplaySettingsExW(
+            PCWSTR(target_device_name_wide.as_ptr()),
+            Some(std::ptr::from_ref(&target_mode)),
+            HWND(std::ptr::null_mut()),
+            CDS_UPDATEREGISTRY | CDS_NORESET | CDS_SET_PRIMARY,
+            None,
+        )
+    };
+    ensure_display_change_success(target_status).with_context(|| {
+        format!(
+            "failed applying primary display change for {}",
+            target.device_name
+        )
+    })?;
+
+    for monitor in monitors
+        .iter()
+        .filter(|monitor| monitor.index != target.index)
+    {
         let device_name_wide = to_wide_null_terminated(&monitor.device_name);
         let mut mode = query_current_mode(PCWSTR(device_name_wide.as_ptr()))?;
 
@@ -177,22 +202,12 @@ pub fn set_primary_monitor(
         mode.Anonymous1.Anonymous2.dmPosition.y = new_y;
         mode.dmFields |= DM_POSITION;
 
-        let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
-
-        if monitor.index == target.index {
-            flags |= CDS_SET_PRIMARY;
-            mode.dmPelsWidth = desired_width as u32;
-            mode.dmPelsHeight = desired_height as u32;
-            mode.dmDisplayFrequency = desired_refresh as u32;
-            mode.dmFields |= DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
-        }
-
         let status = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(device_name_wide.as_ptr()),
                 Some(std::ptr::from_ref(&mode)),
                 HWND(std::ptr::null_mut()),
-                flags,
+                CDS_UPDATEREGISTRY | CDS_NORESET,
                 None,
             )
         };
@@ -214,6 +229,16 @@ pub fn set_primary_monitor(
         )
     };
     ensure_display_change_success(commit_status).context("failed to commit display changes")?;
+
+    if mode_change_requested {
+        apply_mode_only(
+            &target.device_name,
+            desired_width,
+            desired_height,
+            desired_refresh,
+        )
+        .context("failed to apply target monitor mode after primary switch")?;
+    }
 
     tracing::info!(
         target_monitor = target.index,
