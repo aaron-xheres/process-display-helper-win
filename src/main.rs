@@ -24,6 +24,11 @@ struct SingleInstanceGuard {
     handle: HANDLE,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RuntimeOptions {
+    debug_enabled: bool,
+}
+
 impl Drop for SingleInstanceGuard {
     fn drop(&mut self) {
         unsafe {
@@ -41,11 +46,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let exe_dir = executable_dir()?;
+    let options = parse_runtime_options()?;
 
     let _single_instance_guard = match acquire_single_instance_guard()? {
         Some(guard) => guard,
         None => {
-            if logger::init_logger(&exe_dir).is_ok() {
+            if logger::init_logger(&exe_dir, options.debug_enabled).is_ok() {
                 tracing::info!(
                     mutex_name = SINGLE_INSTANCE_MUTEX_NAME,
                     "another instance is already running; exiting"
@@ -59,7 +65,7 @@ fn run() -> Result<()> {
         }
     };
 
-    logger::init_logger(&exe_dir)?;
+    logger::init_logger(&exe_dir, options.debug_enabled)?;
 
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -82,6 +88,28 @@ fn run() -> Result<()> {
     etw_handle.stop();
 
     loop_result
+}
+
+fn parse_runtime_options() -> Result<RuntimeOptions> {
+    let debug_enabled = determine_debug_mode(std::env::args().skip(1));
+    Ok(RuntimeOptions { debug_enabled })
+}
+
+fn determine_debug_mode<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut debug_enabled = cfg!(debug_assertions);
+
+    for arg in args {
+        match arg.as_ref() {
+            "-d" | "--debug" => debug_enabled = true,
+            _ => {}
+        }
+    }
+
+    debug_enabled
 }
 
 fn acquire_single_instance_guard() -> Result<Option<SingleInstanceGuard>> {
@@ -137,4 +165,32 @@ fn show_info_dialog(message: &str) {
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_mode_defaults_to_build_profile() {
+        assert_eq!(determine_debug_mode(std::iter::empty::<&str>()), cfg!(debug_assertions));
+    }
+
+    #[test]
+    fn debug_mode_is_enabled_with_short_flag() {
+        assert!(determine_debug_mode(["-d"]));
+    }
+
+    #[test]
+    fn debug_mode_is_enabled_with_long_flag() {
+        assert!(determine_debug_mode(["--debug"]));
+    }
+
+    #[test]
+    fn unknown_args_are_ignored() {
+        assert_eq!(
+            determine_debug_mode(["--not-a-real-flag"]),
+            cfg!(debug_assertions)
+        );
+    }
 }

@@ -3,18 +3,24 @@ use std::fs::{self, File};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::prelude::*;
 
 const MAX_LINES_PER_FILE: u16 = 1000;
 
-pub fn init_logger(exe_dir: &Path) -> Result<()> {
+pub fn init_logger(exe_dir: &Path, debug_enabled: bool) -> Result<()> {
     let logs_dir = exe_dir.join("logs");
     fs::create_dir_all(&logs_dir)
         .with_context(|| format!("failed to create logs directory at {}", logs_dir.display()))?;
 
     let writer = Mutex::new(RotatingFileWriter::new(logs_dir)?);
     let timer = ChronoLocal::new("%Y-%m-%d %H:%M:%S%.3f".to_string());
+    let level_filter = if debug_enabled {
+        LevelFilter::DEBUG
+    } else {
+        LevelFilter::WARN
+    };
 
     let layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -23,7 +29,8 @@ pub fn init_logger(exe_dir: &Path) -> Result<()> {
         .with_file(false)
         .with_line_number(false)
         .compact()
-        .with_writer(writer);
+        .with_writer(writer)
+        .with_filter(level_filter);
 
     tracing_subscriber::registry()
         .with(layer)
