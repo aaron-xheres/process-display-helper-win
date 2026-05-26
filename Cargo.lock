@@ -1031,7 +1031,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "process-display-helper"
+name = "process-display-helper-win"
 version = "1.0.0"
 dependencies = [
  "anyhow",
