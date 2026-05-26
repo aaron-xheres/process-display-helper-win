@@ -155,6 +155,23 @@ set_primary = true
     }
 
     #[test]
+    fn legacy_monitor_device_field_is_ignored() {
+        let raw = r#"
+[[watch]]
+process_name = "game.exe"
+
+[[watch.display]]
+monitor = 1
+monitor_device = "\\\\.\\DISPLAY2"
+set_primary = true
+"#;
+
+        let parsed: Config = toml::from_str(raw).expect("config should deserialize");
+        assert_eq!(parsed.watch[0].display[0].monitor, 1);
+        assert!(parsed.watch[0].display[0].set_primary);
+    }
+
+    #[test]
     fn empty_config_is_considered_valid() {
         let parsed =
             parse_config_contents("\n\n", Path::new("config.toml")).expect("config should parse");

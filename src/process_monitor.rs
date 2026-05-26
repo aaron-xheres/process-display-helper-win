@@ -62,6 +62,20 @@ pub fn spawn_etw_listener(tx: Sender<ProcessEvent>) -> Result<EtwHandle> {
             })?
         }
         Err(error) => {
+            if is_access_denied_error(&error) {
+                let skip_manifest_set =
+                    std::env::var_os("PROCESS_DISPLAY_HELPER_SKIP_MANIFEST").is_some();
+                let hint = if skip_manifest_set {
+                    "ETW process tracing requires elevation. PROCESS_DISPLAY_HELPER_SKIP_MANIFEST is test-only and disables the administrator manifest. Unset it for normal runs."
+                } else {
+                    "ETW process tracing requires elevation. Run from an elevated terminal or start the built executable with administrator rights."
+                };
+
+                return Err(anyhow!(
+                    "failed to start ETW process trace: access denied ({hint})"
+                ));
+            }
+
             return Err(anyhow!("failed to start ETW process trace: {error:?}"));
         }
     };
@@ -90,6 +104,16 @@ fn is_already_exists_error(error: &TraceError) -> bool {
         error,
         TraceError::EtwNativeError(EvntraceNativeError::AlreadyExist)
     )
+}
+
+fn is_access_denied_error(error: &TraceError) -> bool {
+    match error {
+        TraceError::EtwNativeError(EvntraceNativeError::IoError(io_error)) => {
+            io_error.kind() == std::io::ErrorKind::PermissionDenied
+                || matches!(io_error.raw_os_error(), Some(5 | -2147024891))
+        }
+        _ => false,
+    }
 }
 
 fn handle_process_event(
@@ -137,4 +161,39 @@ fn normalize_process_name(name: &str) -> String {
         .unwrap_or(name);
 
     candidate.trim().to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn already_exists_error_is_detected() {
+        let error = TraceError::EtwNativeError(EvntraceNativeError::AlreadyExist);
+
+        assert!(is_already_exists_error(&error));
+        assert!(!is_access_denied_error(&error));
+    }
+
+    #[test]
+    fn access_denied_error_is_detected_from_io_kind() {
+        let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let error = TraceError::EtwNativeError(EvntraceNativeError::IoError(io_error));
+
+        assert!(is_access_denied_error(&error));
+    }
+
+    #[test]
+    fn non_permission_io_error_is_not_treated_as_access_denied() {
+        let io_error = std::io::Error::from_raw_os_error(2);
+        let error = TraceError::EtwNativeError(EvntraceNativeError::IoError(io_error));
+
+        assert!(!is_access_denied_error(&error));
+    }
+
+    #[test]
+    fn normalize_process_name_uses_filename_and_lowercase() {
+        let normalized = normalize_process_name(r"C:\Program Files\App\ALACRITTY.EXE");
+        assert_eq!(normalized, "alacritty.exe");
+    }
 }

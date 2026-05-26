@@ -2,13 +2,19 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
+    QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     CDS_NORESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW,
     DEVMODE_DISPLAY_ORIENTATION, DEVMODEW, DISP_CHANGE, DISP_CHANGE_SUCCESSFUL,
-    DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_DISPLAYFREQUENCY,
-    DM_DISPLAYORIENTATION, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90, DMDO_180, DMDO_270,
-    DMDO_DEFAULT, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW, EnumDisplaySettingsW,
+    DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICE_PRIMARY_DEVICE, DISPLAY_DEVICEW,
+    DM_DISPLAYFREQUENCY, DM_DISPLAYORIENTATION, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90,
+    DMDO_180, DMDO_270, DMDO_DEFAULT, ENUM_CURRENT_SETTINGS, EnumDisplayDevicesW,
+    EnumDisplaySettingsW,
 };
 use windows::core::PCWSTR;
 
@@ -45,7 +51,6 @@ pub struct MonitorInfo {
 pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
     let mut result = Vec::new();
     let mut device_num: u32 = 0;
-    let mut index: u8 = 1;
 
     loop {
         let mut display_device = DISPLAY_DEVICEW::default();
@@ -93,20 +98,63 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
             mode.dmDisplayFrequency as u16
         };
 
+        let device_name = wide_to_string(&display_device.DeviceName);
+        let is_primary = (display_device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+
         result.push(MonitorInfo {
-            device_name: wide_to_string(&display_device.DeviceName),
-            index,
+            device_name,
+            index: 0,
             position,
             resolution: (mode.dmPelsWidth as u16, mode.dmPelsHeight as u16),
             refresh_rate: refresh,
             display_orientation,
-            is_primary: position == (0, 0),
+            is_primary,
         });
+    }
 
-        index = index.saturating_add(1);
+    if result.is_empty() {
+        return Ok(result);
+    }
+
+    let display_label_indices =
+        load_display_label_indices().context("failed to load monitor labels from DisplayConfig")?;
+
+    for monitor in &mut result {
+        monitor.index = display_label_indices
+            .get(&monitor.device_name)
+            .copied()
+            .ok_or_else(|| {
+                let mut known_labels: Vec<_> = display_label_indices.keys().cloned().collect();
+                known_labels.sort();
+                anyhow!(
+                    "DisplayConfig did not return a label for active monitor '{}' (known labels: {:?})",
+                    monitor.device_name,
+                    known_labels
+                )
+            })?;
     }
 
     Ok(result)
+}
+
+pub fn log_monitor_inventory() -> Result<()> {
+    let monitors = enumerate_monitors()?;
+    for monitor in monitors {
+        tracing::info!(
+            monitor = monitor.index,
+            device = %monitor.device_name,
+            is_primary = monitor.is_primary,
+            position_x = monitor.position.0,
+            position_y = monitor.position.1,
+            width = monitor.resolution.0,
+            height = monitor.resolution.1,
+            refresh_hz = monitor.refresh_rate,
+            orientation = monitor.display_orientation.0,
+            "monitor inventory"
+        );
+    }
+
+    Ok(())
 }
 
 pub fn current_primary_snapshot() -> Result<DisplaySnapshot> {
@@ -616,6 +664,138 @@ fn is_flipped_orientation(orientation: DEVMODE_DISPLAY_ORIENTATION) -> bool {
 fn wide_to_string(wide: &[u16]) -> String {
     let len = wide.iter().position(|ch| *ch == 0).unwrap_or(wide.len());
     String::from_utf16_lossy(&wide[..len])
+}
+
+fn load_display_label_indices() -> Result<HashMap<String, u8>> {
+    const MAX_QUERY_RETRIES: u8 = 3;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    let mut attempt: u8 = 0;
+    loop {
+        attempt = attempt.saturating_add(1);
+
+        let mut path_count = 0u32;
+        let mut mode_count = 0u32;
+
+        let buffer_status = unsafe {
+            GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+        };
+        if buffer_status.0 != 0 {
+            bail!(
+                "GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS) failed with status {} ({})",
+                buffer_status.0,
+                win32_status_message(buffer_status.0 as i32)
+            );
+        }
+
+        let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+        let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+
+        let query_status = unsafe {
+            QueryDisplayConfig(
+                QDC_ONLY_ACTIVE_PATHS,
+                &mut path_count,
+                paths.as_mut_ptr(),
+                &mut mode_count,
+                modes.as_mut_ptr(),
+                None,
+            )
+        };
+
+        if query_status.0 == ERROR_INSUFFICIENT_BUFFER && attempt < MAX_QUERY_RETRIES {
+            tracing::debug!(
+                attempt,
+                status = query_status.0,
+                status_text = %win32_status_message(query_status.0 as i32),
+                requested_path_count = paths.len(),
+                requested_mode_count = modes.len(),
+                "QueryDisplayConfig reported insufficient buffer; retrying"
+            );
+            continue;
+        }
+
+        if query_status.0 != 0 {
+            bail!(
+                "QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS) failed with status {} ({})",
+                query_status.0,
+                win32_status_message(query_status.0 as i32)
+            );
+        }
+
+        paths.truncate(path_count as usize);
+        if paths.is_empty() {
+            bail!("QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS) returned zero active display paths");
+        }
+
+        let mut mapping = HashMap::new();
+        let mut source_name_failures = 0u32;
+        let mut ordinal_overflow = 0u32;
+
+        for path in paths {
+            let mut source_name = DISPLAYCONFIG_SOURCE_DEVICE_NAME::default();
+            source_name.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+            source_name.header.size = size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32;
+            source_name.header.adapterId = path.sourceInfo.adapterId;
+            source_name.header.id = path.sourceInfo.id;
+
+            let status = unsafe { DisplayConfigGetDeviceInfo(&mut source_name.header) };
+            if status != 0 {
+                source_name_failures = source_name_failures.saturating_add(1);
+                tracing::warn!(
+                    status,
+                    status_text = %win32_status_message(status),
+                    adapter_luid_high = path.sourceInfo.adapterId.HighPart,
+                    adapter_luid_low = path.sourceInfo.adapterId.LowPart,
+                    source_id = path.sourceInfo.id,
+                    target_id = path.targetInfo.id,
+                    "DisplayConfigGetDeviceInfo(GET_SOURCE_NAME) failed for active path"
+                );
+                continue;
+            }
+
+            let gdi_name = wide_to_string(&source_name.viewGdiDeviceName);
+            if mapping.contains_key(&gdi_name) {
+                continue;
+            }
+
+            let Some(monitor_index) = u8::try_from(mapping.len().saturating_add(1)).ok() else {
+                ordinal_overflow = ordinal_overflow.saturating_add(1);
+                tracing::warn!(
+                    gdi_name = %gdi_name,
+                    source_id = path.sourceInfo.id,
+                    adapter_luid_high = path.sourceInfo.adapterId.HighPart,
+                    adapter_luid_low = path.sourceInfo.adapterId.LowPart,
+                    target_id = path.targetInfo.id,
+                    "DisplayConfig path ordinal exceeded supported monitor index range"
+                );
+                continue;
+            };
+
+            tracing::debug!(
+                gdi_name = %gdi_name,
+                source_id = path.sourceInfo.id,
+                target_id = path.targetInfo.id,
+                monitor = monitor_index,
+                "mapped monitor label from DisplayConfig path order"
+            );
+            mapping.insert(gdi_name, monitor_index);
+        }
+
+        if mapping.is_empty() {
+            bail!(
+                "DisplayConfig returned {} active path(s) but no usable source labels (device_info_failures={}, ordinal_overflow={})",
+                path_count,
+                source_name_failures,
+                ordinal_overflow
+            );
+        }
+
+        return Ok(mapping);
+    }
+}
+
+fn win32_status_message(status: i32) -> String {
+    std::io::Error::from_raw_os_error(status).to_string()
 }
 
 fn to_wide_null_terminated(value: &str) -> Vec<u16> {

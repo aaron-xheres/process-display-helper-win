@@ -265,16 +265,16 @@ fn effective_primary_monitor(watch_entry: &WatchEntry) -> Option<u8> {
 }
 
 fn apply_watch_display_plan(watch_entry: &WatchEntry) -> Result<()> {
-    let effective_primary = watch_entry
+    let effective_primary_idx = watch_entry
         .display
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, display)| display.set_primary);
-    let effective_primary_monitor = effective_primary.map(|(_, display)| display.monitor);
+        .find(|(_, display)| display.set_primary)
+        .map(|(idx, _)| idx);
 
-    for display in &watch_entry.display {
-        if Some(display.monitor) == effective_primary_monitor {
+    for (idx, display) in watch_entry.display.iter().enumerate() {
+        if Some(idx) == effective_primary_idx {
             continue;
         }
 
@@ -292,7 +292,9 @@ fn apply_watch_display_plan(watch_entry: &WatchEntry) -> Result<()> {
         })?;
     }
 
-    if let Some((_, display)) = effective_primary {
+    if let Some(primary_idx) = effective_primary_idx {
+        let display = &watch_entry.display[primary_idx];
+
         set_primary_monitor(
             display.monitor,
             display.resolution,

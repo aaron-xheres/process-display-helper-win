@@ -70,6 +70,10 @@ fn run() -> Result<()> {
     let config = config::load_config(&exe_dir)?;
     tracing::info!(watch_entries = config.watch.len(), "config loaded");
 
+    if let Err(error) = monitor::log_monitor_inventory() {
+        tracing::warn!(error = %error, "failed to log monitor inventory");
+    }
+
     let (tx, rx) = mpsc::channel();
     let etw_handle = process_monitor::spawn_etw_listener(tx)?;
     let mut state = watcher::WatchState::default();
