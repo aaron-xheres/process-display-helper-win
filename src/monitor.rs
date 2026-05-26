@@ -7,7 +7,6 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_SOURCE_DEVICE_NAME, DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
     QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
-use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     CDS_NORESET, CDS_SET_PRIMARY, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW,
     DEVMODE_DISPLAY_ORIENTATION, DEVMODEW, DISP_CHANGE, DISP_CHANGE_SUCCESSFUL,
@@ -63,7 +62,9 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
 
         device_num = device_num.saturating_add(1);
 
-        let attached = (display_device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) != 0;
+        let attached = display_device
+            .StateFlags
+            .contains(DISPLAY_DEVICE_ATTACHED_TO_DESKTOP);
         if !attached {
             continue;
         }
@@ -99,7 +100,9 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
         };
 
         let device_name = wide_to_string(&display_device.DeviceName);
-        let is_primary = (display_device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE) != 0;
+        let is_primary = display_device
+            .StateFlags
+            .contains(DISPLAY_DEVICE_PRIMARY_DEVICE);
 
         result.push(MonitorInfo {
             device_name,
@@ -380,7 +383,7 @@ fn set_primary_monitor_with_orientation(
         ChangeDisplaySettingsExW(
             PCWSTR(target_device_name_wide.as_ptr()),
             Some(std::ptr::from_ref(&target_mode)),
-            HWND(std::ptr::null_mut()),
+            None,
             CDS_UPDATEREGISTRY | CDS_NORESET | CDS_SET_PRIMARY,
             None,
         )
@@ -410,7 +413,7 @@ fn set_primary_monitor_with_orientation(
             ChangeDisplaySettingsExW(
                 PCWSTR(device_name_wide.as_ptr()),
                 Some(std::ptr::from_ref(&mode)),
-                HWND(std::ptr::null_mut()),
+                None,
                 CDS_UPDATEREGISTRY | CDS_NORESET,
                 None,
             )
@@ -423,15 +426,8 @@ fn set_primary_monitor_with_orientation(
         })?;
     }
 
-    let commit_status = unsafe {
-        ChangeDisplaySettingsExW(
-            PCWSTR::null(),
-            None,
-            HWND(std::ptr::null_mut()),
-            Default::default(),
-            None,
-        )
-    };
+    let commit_status =
+        unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, Default::default(), None) };
     ensure_display_change_success(commit_status).context("failed to commit display changes")?;
 
     if mode_change_requested {
@@ -541,7 +537,7 @@ fn apply_mode_single_pass(
         ChangeDisplaySettingsExW(
             device_name,
             Some(std::ptr::from_ref(&mode)),
-            HWND(std::ptr::null_mut()),
+            None,
             CDS_UPDATEREGISTRY,
             None,
         )
@@ -577,7 +573,7 @@ fn apply_mode_orientation_first(
             ChangeDisplaySettingsExW(
                 device_name,
                 Some(std::ptr::from_ref(&orientation_mode)),
-                HWND(std::ptr::null_mut()),
+                None,
                 CDS_UPDATEREGISTRY,
                 None,
             )

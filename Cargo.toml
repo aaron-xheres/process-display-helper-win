@@ -1,6 +1,6 @@
 [package]
 name = "process-display-helper"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -8,11 +8,11 @@ anyhow = "1.0"
 chrono = { version = "0.4", default-features = true }
 ferrisetw = "1.2"
 serde = { version = "1.0", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "chrono"] }
-tray-icon = "0.20"
-windows = { version = "0.58", features = [
+tray-icon = "0.24"
+windows = { version = "0.62", features = [
     "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

@@ -1,7 +1,7 @@
 use crate::monitor::{MonitorInfo, enumerate_monitors};
 use anyhow::{Context, Result, anyhow, bail};
 use std::mem::size_of;
-use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
@@ -9,6 +9,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SWP_NOACTIVATE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
 };
+use windows::core::BOOL;
 
 pub fn move_process_windows_to_monitor(pid: u32, target_monitor_index: u8) -> Result<u32> {
     let monitors = enumerate_monitors()?;
@@ -87,7 +88,7 @@ fn move_window_to_monitor(hwnd: HWND, target_monitor: &MonitorInfo) -> Result<()
     unsafe {
         SetWindowPos(
             hwnd,
-            HWND::default(),
+            None,
             clamped_left,
             clamped_top,
             0,

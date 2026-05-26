@@ -173,7 +173,10 @@ mod tests {
 
     #[test]
     fn debug_mode_defaults_to_build_profile() {
-        assert_eq!(determine_debug_mode(std::iter::empty::<&str>()), cfg!(debug_assertions));
+        assert_eq!(
+            determine_debug_mode(std::iter::empty::<&str>()),
+            cfg!(debug_assertions)
+        );
     }
 
     #[test]
