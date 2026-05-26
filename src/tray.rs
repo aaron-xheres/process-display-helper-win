@@ -10,8 +10,10 @@ use std::time::Duration;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+    DispatchMessageW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW, PM_REMOVE,
+    PeekMessageW, TranslateMessage,
 };
+use windows::core::PCWSTR;
 
 pub fn run_message_loop(
     exe_dir: &Path,
@@ -22,6 +24,7 @@ pub fn run_message_loop(
     let tray_menu = Menu::new();
     let open_config_item = MenuItem::new("Open Config Folder", true, None);
     let reload_config_item = MenuItem::new("Reload Config", true, None);
+    let check_config_item = MenuItem::new("Check Config", true, None);
     let exit_item = MenuItem::new("Exit", true, None);
     let mut active_config = config.clone();
 
@@ -32,6 +35,9 @@ pub fn run_message_loop(
         .append(&reload_config_item)
         .context("failed to append Reload Config menu item")?;
     tray_menu
+        .append(&check_config_item)
+        .context("failed to append Check Config menu item")?;
+    tray_menu
         .append(&PredefinedMenuItem::separator())
         .context("failed to append menu separator")?;
     tray_menu
@@ -40,6 +46,7 @@ pub fn run_message_loop(
 
     let open_config_id = open_config_item.id().clone();
     let reload_config_id = reload_config_item.id().clone();
+    let check_config_id = check_config_item.id().clone();
     let exit_id = exit_item.id().clone();
 
     let icon =
@@ -60,6 +67,8 @@ pub fn run_message_loop(
                 open_config_folder(exe_dir);
             } else if event.id == reload_config_id {
                 reload_config_from_disk(exe_dir, &mut active_config, state);
+            } else if event.id == check_config_id {
+                check_config_from_disk(exe_dir);
             } else if event.id == exit_id {
                 tracing::info!("exit requested from tray");
                 return Ok(());
@@ -106,12 +115,73 @@ fn reload_config_from_disk(exe_dir: &Path, config: &mut Config, state: &mut Watc
 
             if let Err(error) = reload_watch_state(config, state) {
                 tracing::error!(error = %error, "failed to apply reloaded configuration");
+                show_error_dialog(&format!(
+                    "Configuration was reloaded but failed to apply runtime state:\n{error:#}"
+                ));
+                return;
             }
+
+            show_info_dialog(&format!(
+                "Configuration reloaded successfully.\nWatch entries: {}",
+                config.watch.len()
+            ));
         }
         Err(error) => {
             tracing::error!(error = %error, "failed to reload configuration from disk");
+            show_error_dialog(&format!("Failed to reload configuration:\n{error:#}"));
         }
     }
+}
+
+fn check_config_from_disk(exe_dir: &Path) {
+    match crate::config::check_config_file(exe_dir) {
+        Ok(validated) => {
+            tracing::info!(
+                watch_entries = validated.watch.len(),
+                "configuration check succeeded"
+            );
+            show_info_dialog(&format!(
+                "Configuration is valid.\nWatch entries: {}",
+                validated.watch.len()
+            ));
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "configuration check failed");
+            show_error_dialog(&format!("Configuration is invalid:\n{error:#}"));
+        }
+    }
+}
+
+fn show_info_dialog(message: &str) {
+    let title = wide("Process Display Helper");
+    let body = wide(message);
+
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+}
+
+fn show_error_dialog(message: &str) {
+    let title = wide("Process Display Helper");
+    let body = wide(message);
+
+    unsafe {
+        MessageBoxW(
+            None,
+            PCWSTR(body.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn pump_windows_messages() {
