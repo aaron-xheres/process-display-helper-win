@@ -4,6 +4,7 @@ use crate::monitor::{
     set_primary_monitor,
 };
 use crate::process_monitor::ProcessEvent;
+use crate::window_move::move_process_windows_to_monitor;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -75,6 +76,8 @@ pub fn reload_config(config: &Config, state: &mut WatchState) -> Result<()> {
             display_count = watch_entry.display.len(),
             "applied winner display configuration after config reload"
         );
+
+        maybe_move_winner_processes(winner_key, watch_entry, state);
 
         state.current_winner = next_winner;
         return Ok(());
@@ -244,6 +247,8 @@ fn apply_winner_if_changed(config: &Config, state: &mut WatchState) -> Result<()
             display_count = watch_entry.display.len(),
             "display control moved to winner"
         );
+
+        maybe_move_winner_processes(winner_key, watch_entry, state);
     }
 
     state.current_winner = next_winner;
@@ -305,6 +310,67 @@ fn apply_watch_display_plan(watch_entry: &WatchEntry) -> Result<()> {
     Ok(())
 }
 
+fn maybe_move_winner_processes(winner_key: &str, watch_entry: &WatchEntry, state: &WatchState) {
+    let Some(target_monitor) = effective_move_target_monitor(watch_entry) else {
+        tracing::warn!(
+            process = %winner_key,
+            "move_to_monitor is not enabled on any [[watch.display]] entry"
+        );
+        return;
+    };
+
+    let Some(active) = state.active.get(winner_key) else {
+        tracing::warn!(
+            process = %winner_key,
+            target_monitor,
+            "winner has no active process state while attempting move_to_monitor"
+        );
+        return;
+    };
+
+    let mut moved_windows_total = 0u32;
+    for pid in &active.pids {
+        match move_process_windows_to_monitor(*pid, target_monitor) {
+            Ok(moved_windows) => {
+                moved_windows_total = moved_windows_total.saturating_add(moved_windows);
+                tracing::info!(
+                    process = %winner_key,
+                    pid = *pid,
+                    target_monitor,
+                    moved_windows,
+                    "move_to_monitor processed"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    process = %winner_key,
+                    pid = *pid,
+                    target_monitor,
+                    error = %error,
+                    "failed to move process windows to monitor"
+                );
+            }
+        }
+    }
+
+    if moved_windows_total == 0 {
+        tracing::debug!(
+            process = %winner_key,
+            target_monitor,
+            "move_to_monitor found no visible windows to reposition"
+        );
+    }
+}
+
+fn effective_move_target_monitor(watch_entry: &WatchEntry) -> Option<u8> {
+    watch_entry
+        .display
+        .iter()
+        .rev()
+        .find(|display| display.move_to_monitor)
+        .map(|display| display.monitor)
+}
+
 fn find_winner_key(config: &Config, state: &WatchState) -> Option<String> {
     state
         .active
@@ -343,6 +409,22 @@ mod tests {
         DisplayEntry {
             monitor,
             set_primary,
+            move_to_monitor: false,
+            resolution: None,
+            refresh_rate: None,
+            flip_orientation: false,
+        }
+    }
+
+    fn display_entry_with_move(
+        monitor: u8,
+        set_primary: bool,
+        move_to_monitor: bool,
+    ) -> DisplayEntry {
+        DisplayEntry {
+            monitor,
+            set_primary,
+            move_to_monitor,
             resolution: None,
             refresh_rate: None,
             flip_orientation: false,
@@ -442,5 +524,33 @@ mod tests {
 
         let winner = find_winner_key(&config, &state);
         assert_eq!(winner.as_deref(), Some("b.exe"));
+    }
+
+    #[test]
+    fn effective_move_target_monitor_uses_last_move_to_monitor_entry() {
+        let entry = WatchEntry {
+            process_name: "test.exe".to_string(),
+            restore_on_exit: true,
+            priority: 0,
+            display: vec![
+                display_entry_with_move(2, false, true),
+                display_entry_with_move(3, true, false),
+                display_entry_with_move(1, true, true),
+            ],
+        };
+
+        assert_eq!(effective_move_target_monitor(&entry), Some(1));
+    }
+
+    #[test]
+    fn effective_move_target_monitor_is_none_when_no_display_enables_move() {
+        let entry = WatchEntry {
+            process_name: "test.exe".to_string(),
+            restore_on_exit: true,
+            priority: 0,
+            display: vec![display_entry(4, false), display_entry(2, false)],
+        };
+
+        assert_eq!(effective_move_target_monitor(&entry), None);
     }
 }

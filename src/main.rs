@@ -6,6 +6,7 @@ mod monitor;
 mod process_monitor;
 mod tray;
 mod watcher;
+mod window_move;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
