@@ -17,6 +17,7 @@ const CONFIG_TEMPLATE: &str = r#"# process-display-helper configuration
 # [[watch.display]]
 # monitor = 1
 # set_primary = false
+# move_to_monitor = false
 # resolution = [1920, 1080]
 # refresh_rate = 60
 # flip_orientation = false
@@ -24,20 +25,9 @@ const CONFIG_TEMPLATE: &str = r#"# process-display-helper configuration
 # [[watch.display]]
 # monitor = 2
 # set_primary = true
+# move_to_monitor = true
 # resolution = [1080, 1920]
 # refresh_rate = 165
-# flip_orientation = false
-#
-# [[watch]]
-# process_name = "obs64.exe"
-# restore_on_exit = false
-# priority = 5
-#
-# [[watch.display]]
-# monitor = 1
-# set_primary = true
-# resolution = [1920, 1080]
-# refresh_rate = 120
 # flip_orientation = false
 "#;
 
@@ -54,6 +44,7 @@ pub struct WatchEntry {
     pub restore_on_exit: bool,
     #[serde(default)]
     pub priority: u8,
+    #[serde(default)]
     pub display: Vec<DisplayEntry>,
 }
 
@@ -62,6 +53,8 @@ pub struct DisplayEntry {
     pub monitor: u8,
     #[serde(default)]
     pub set_primary: bool,
+    #[serde(default)]
+    pub move_to_monitor: bool,
     pub resolution: Option<[u16; 2]>,
     pub refresh_rate: Option<u16>,
     #[serde(default)]
@@ -83,15 +76,32 @@ pub fn load_config(exe_dir: &Path) -> Result<Config> {
 
     let raw = fs::read_to_string(&config_path)
         .with_context(|| format!("failed to read config file at {}", config_path.display()))?;
+    parse_config_contents(&raw, &config_path)
+}
+
+pub fn check_config_file(exe_dir: &Path) -> Result<Config> {
+    let config_path = config_path(exe_dir);
+    let raw = fs::read_to_string(&config_path)
+        .with_context(|| format!("failed to read config file at {}", config_path.display()))?;
+    parse_config_contents(&raw, &config_path)
+}
+
+fn parse_config_contents(raw: &str, config_path: &Path) -> Result<Config> {
     if raw.trim().is_empty() {
         tracing::warn!(path = %config_path.display(), "config file is empty; using no watch entries");
         return Ok(Config::default());
     }
 
-    let parsed: Config = toml::from_str(&raw)
+    let parsed: Config = toml::from_str(raw)
         .with_context(|| format!("failed to parse config file at {}", config_path.display()))?;
 
-    for watch in &parsed.watch {
+    validate_config(&parsed)?;
+
+    Ok(parsed)
+}
+
+fn validate_config(config: &Config) -> Result<()> {
+    for watch in &config.watch {
         if watch.display.is_empty() {
             bail!(
                 "watch entry '{}' must define at least one [[watch.display]] section",
@@ -100,9 +110,55 @@ pub fn load_config(exe_dir: &Path) -> Result<Config> {
         }
     }
 
-    Ok(parsed)
+    Ok(())
 }
 
 pub fn config_path(exe_dir: &Path) -> PathBuf {
     exe_dir.join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn watch_display_is_required() {
+        let raw = r#"
+[[watch]]
+process_name = "game.exe"
+"#;
+
+        let parsed: Config = toml::from_str(raw).expect("config should deserialize for validation");
+        let error = validate_config(&parsed).expect_err("validation should reject missing display");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must define at least one [[watch.display]] section")
+        );
+    }
+
+    #[test]
+    fn display_move_to_monitor_defaults_false() {
+        let raw = r#"
+[[watch]]
+process_name = "game.exe"
+
+[[watch.display]]
+monitor = 1
+set_primary = true
+"#;
+
+        let parsed: Config = toml::from_str(raw).expect("config should deserialize");
+        assert!(!parsed.watch[0].display[0].move_to_monitor);
+    }
+
+    #[test]
+    fn empty_config_is_considered_valid() {
+        let parsed =
+            parse_config_contents("\n\n", Path::new("config.toml")).expect("config should parse");
+
+        assert!(parsed.watch.is_empty());
+    }
 }
