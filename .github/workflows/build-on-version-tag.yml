@@ -9,7 +9,7 @@ env:
   CARGO_TERM_COLOR: always
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -25,3 +25,16 @@ jobs:
 
       - name: Build release
         run: cargo build --release --locked
+
+      - name: Prepare release asset
+        shell: pwsh
+        run: |
+          $assetName = "process-display-helper-win-${{ github.ref_name }}-windows-x64.exe"
+          Copy-Item "target/release/process-display-helper-win.exe" "target/release/$assetName"
+
+      - name: Upload asset to tag release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/process-display-helper-win-${{ github.ref_name }}-windows-x64.exe
+          fail_on_unmatched_files: true
+          overwrite_files: true
