@@ -467,6 +467,7 @@ mod tests {
     #[test]
     fn find_watch_entry_matches_case_insensitively() {
         let config = Config {
+            run_on_startup: false,
             watch: vec![watch_entry("ALACRITTY.EXE", 0)],
         };
 
@@ -477,6 +478,7 @@ mod tests {
     #[test]
     fn winner_prefers_higher_priority() {
         let config = Config {
+            run_on_startup: false,
             watch: vec![watch_entry("a.exe", 1), watch_entry("b.exe", 5)],
         };
 
@@ -504,6 +506,7 @@ mod tests {
     #[test]
     fn winner_uses_newest_activation_for_priority_ties() {
         let config = Config {
+            run_on_startup: false,
             watch: vec![watch_entry("a.exe", 3), watch_entry("b.exe", 3)],
         };
 
