@@ -15,8 +15,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PCWSTR;
 
-const RUN_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-const RUN_REGISTRY_VALUE_NAME: &str = "ProcessDisplayHelperWin";
+const STARTUP_TASK_NAME: &str = "ProcessDisplayHelperWin";
+const LEGACY_RUN_REGISTRY_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const LEGACY_RUN_REGISTRY_VALUE_NAME: &str = "ProcessDisplayHelperWin";
 
 pub fn run_message_loop(
     exe_dir: &Path,
@@ -213,7 +214,7 @@ fn toggle_run_on_startup(exe_dir: &Path, config: &mut Config, run_on_startup_ite
         Err(error) => {
             tracing::error!(error = %error, enabled = target, "failed to persist run on startup setting");
             if let Err(rollback_error) = apply_run_on_startup_setting(previous) {
-                tracing::error!(error = %rollback_error, enabled = previous, "failed to roll back run on startup registry state after config write failure");
+                tracing::error!(error = %rollback_error, enabled = previous, "failed to roll back run on startup state after config write failure");
             }
             run_on_startup_item.set_checked(previous);
             show_error_dialog(&format!(
@@ -225,35 +226,69 @@ fn toggle_run_on_startup(exe_dir: &Path, config: &mut Config, run_on_startup_ite
 
 fn apply_run_on_startup_setting(enabled: bool) -> Result<()> {
     if enabled {
-        add_run_on_startup_registry_value()
+        add_run_on_startup_task()?;
+
+        if let Err(error) = remove_legacy_run_on_startup_registry_value() {
+            tracing::warn!(error = %error, "failed to remove legacy Run registry startup value");
+        }
+
+        Ok(())
     } else {
-        remove_run_on_startup_registry_value()
+        remove_run_on_startup_task()?;
+
+        if let Err(error) = remove_legacy_run_on_startup_registry_value() {
+            tracing::warn!(error = %error, "failed to remove legacy Run registry startup value");
+        }
+
+        Ok(())
     }
 }
 
-fn add_run_on_startup_registry_value() -> Result<()> {
-    let command_value = startup_registry_command_value()?;
-    run_reg_command(
+fn add_run_on_startup_task() -> Result<()> {
+    let command_value = startup_task_command_value()?;
+    run_schtasks_command(
         &[
-            "add",
-            RUN_REGISTRY_KEY,
-            "/v",
-            RUN_REGISTRY_VALUE_NAME,
-            "/t",
-            "REG_SZ",
-            "/d",
+            "/Create",
+            "/TN",
+            STARTUP_TASK_NAME,
+            "/SC",
+            "ONLOGON",
+            "/RL",
+            "HIGHEST",
+            "/TR",
             &command_value,
-            "/f",
+            "/F",
         ],
-        "adding Run on Startup registry value",
+        "adding Run on Startup scheduled task",
     )
 }
 
-fn remove_run_on_startup_registry_value() -> Result<()> {
-    let query_output = Command::new("reg")
-        .args(["query", RUN_REGISTRY_KEY, "/v", RUN_REGISTRY_VALUE_NAME])
+fn remove_run_on_startup_task() -> Result<()> {
+    let query_output = Command::new("schtasks")
+        .args(["/Query", "/TN", STARTUP_TASK_NAME])
         .output()
-        .context("failed to query Run on Startup registry value")?;
+        .context("failed to query Run on Startup scheduled task")?;
+
+    if !query_output.status.success() {
+        return Ok(());
+    }
+
+    run_schtasks_command(
+        &["/Delete", "/TN", STARTUP_TASK_NAME, "/F"],
+        "removing Run on Startup scheduled task",
+    )
+}
+
+fn remove_legacy_run_on_startup_registry_value() -> Result<()> {
+    let query_output = Command::new("reg")
+        .args([
+            "query",
+            LEGACY_RUN_REGISTRY_KEY,
+            "/v",
+            LEGACY_RUN_REGISTRY_VALUE_NAME,
+        ])
+        .output()
+        .context("failed to query legacy Run on Startup registry value")?;
 
     if !query_output.status.success() {
         return Ok(());
@@ -262,13 +297,30 @@ fn remove_run_on_startup_registry_value() -> Result<()> {
     run_reg_command(
         &[
             "delete",
-            RUN_REGISTRY_KEY,
+            LEGACY_RUN_REGISTRY_KEY,
             "/v",
-            RUN_REGISTRY_VALUE_NAME,
+            LEGACY_RUN_REGISTRY_VALUE_NAME,
             "/f",
         ],
-        "removing Run on Startup registry value",
+        "removing legacy Run on Startup registry value",
     )
+}
+
+fn run_schtasks_command(args: &[&str], action: &str) -> Result<()> {
+    let output = Command::new("schtasks")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to execute schtasks command while {action}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if stderr.is_empty() { stdout } else { stderr };
+
+    bail!("schtasks command failed while {action}: {details}")
 }
 
 fn run_reg_command(args: &[&str], action: &str) -> Result<()> {
@@ -288,7 +340,7 @@ fn run_reg_command(args: &[&str], action: &str) -> Result<()> {
     bail!("reg command failed while {action}: {details}")
 }
 
-fn startup_registry_command_value() -> Result<String> {
+fn startup_task_command_value() -> Result<String> {
     let exe_path = std::env::current_exe().context("failed to resolve executable path")?;
     Ok(format!("\"{}\"", exe_path.display()))
 }
